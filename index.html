@@ -1,0 +1,406 @@
+<html>
+
+<head>
+    <meta http-equiv="content-type" content="text/html; charset=ISO-8859-1">
+
+    <script type="text/javascript" src="glMatrix-0.9.5.min.js"></script>
+    <script type="text/javascript" src="webgl-utils.js"></script>
+    <script type="text/javascript" src="index.js"></script>
+    <script type="text/javascript" src="bodymaker.js"></script>
+
+
+    <script id="shader-fs" type="x-shader/x-fragment">
+        precision mediump float; varying vec4 vColor; varying vec3 vLightWeighting; void main(void) { gl_FragColor = vec4(vColor.rgb * vLightWeighting, vColor.a); }
+    </script>
+
+    <script id="shader-vs" type="x-shader/x-vertex">
+        attribute vec3 aVertexPosition; attribute vec3 aVertexNormal; attribute vec4 aVertexColor; uniform mat4 uMVMatrix; uniform mat4 uPMatrix; uniform mat3 uNMatrix; varying vec4 vColor; varying vec2 vTextureCoord; varying vec3 vLightWeighting; uniform vec3 uAmbientColor; uniform vec3 uLightingDirection; uniform vec3 uDirectionalColor; void main(void) { gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0); vColor = aVertexColor; vec3 transformedNormal = uNMatrix * aVertexNormal; float directionalLightWeighting = max(dot(transformedNormal, uLightingDirection), 0.0); vLightWeighting = uAmbientColor + uDirectionalColor * directionalLightWeighting; }
+    </script>
+
+    <script type="text/javascript">
+        var gl;
+
+        function assumeFull(canvas){
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+
+        function initGL(canvas) {
+            assumeFull(canvas);
+            try {
+                gl = WebGLUtils.create3DContext(canvas);
+            } catch (e) {}
+            if (!gl) {
+                alert("Could not initialise WebGL, sorry :-(");
+            }
+        }
+
+
+        function getShader(gl, id) {
+            var shaderScript = document.getElementById(id);
+            if (!shaderScript) {
+                return null;
+            }
+
+            var str = "";
+            var k = shaderScript.firstChild;
+            while (k) {
+                if (k.nodeType == 3) {
+                    str += k.textContent;
+                }
+                k = k.nextSibling;
+            }
+
+            var shader;
+            if (shaderScript.type == "x-shader/x-fragment") {
+                shader = gl.createShader(gl.FRAGMENT_SHADER);
+            } else if (shaderScript.type == "x-shader/x-vertex") {
+                shader = gl.createShader(gl.VERTEX_SHADER);
+            } else {
+                return null;
+            }
+
+            gl.shaderSource(shader, str);
+            gl.compileShader(shader);
+
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                alert(gl.getShaderInfoLog(shader));
+                return null;
+            }
+
+            return shader;
+        }
+
+
+        var shaderProgram;
+
+        function initShaders() {
+            var fragmentShader = getShader(gl, "shader-fs");
+            var vertexShader = getShader(gl, "shader-vs");
+
+            shaderProgram = gl.createProgram();
+            gl.attachShader(shaderProgram, vertexShader);
+            gl.attachShader(shaderProgram, fragmentShader);
+            gl.linkProgram(shaderProgram);
+
+            if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+                alert("Could not initialise shaders");
+            }
+
+            gl.useProgram(shaderProgram);
+
+            shaderProgram.vertexPositionAttribute = gl.getAttribLocation(shaderProgram, "aVertexPosition");
+            gl.enableVertexAttribArray(shaderProgram.vertexPositionAttribute);
+
+            shaderProgram.vertexColorAttribute = gl.getAttribLocation(shaderProgram, "aVertexColor");
+            gl.enableVertexAttribArray(shaderProgram.vertexColorAttribute);
+
+            shaderProgram.vertexNormalAttribute = gl.getAttribLocation(shaderProgram, "aVertexNormal");
+            gl.enableVertexAttribArray(shaderProgram.vertexNormalAttribute);
+
+            shaderProgram.pMatrixUniform = gl.getUniformLocation(shaderProgram, "uPMatrix");
+            shaderProgram.mvMatrixUniform = gl.getUniformLocation(shaderProgram, "uMVMatrix");
+            shaderProgram.nMatrixUniform = gl.getUniformLocation(shaderProgram, "uNMatrix");
+
+
+            shaderProgram.ambientColorUniform = gl.getUniformLocation(shaderProgram, "uAmbientColor");
+            shaderProgram.lightingDirectionUniform = gl.getUniformLocation(shaderProgram, "uLightingDirection");
+            shaderProgram.directionalColorUniform = gl.getUniformLocation(shaderProgram, "uDirectionalColor");
+        }
+
+
+        var mvMatrix = mat4.create();
+        var mvMatrixStack = [];
+        var pMatrix = mat4.create();
+
+        function mvPushMatrix() {
+            var copy = mat4.create();
+            mat4.set(mvMatrix, copy);
+            mvMatrixStack.push(copy);
+        }
+
+        function mvPopMatrix() {
+            if (mvMatrixStack.length == 0) {
+                throw "Invalid popMatrix!";
+            }
+            mvMatrix = mvMatrixStack.pop();
+        }
+
+
+        function setMatrixUniforms() {
+            gl.uniformMatrix4fv(shaderProgram.pMatrixUniform, false, pMatrix);
+            gl.uniformMatrix4fv(shaderProgram.mvMatrixUniform, false, mvMatrix);
+
+            var normalMatrix = mat3.create();
+            mat4.toInverseMat3(mvMatrix, normalMatrix);
+            mat3.transpose(normalMatrix);
+            gl.uniformMatrix3fv(shaderProgram.nMatrixUniform, false, normalMatrix);
+        }
+
+
+        function degToRad(degrees) {
+            return degrees * Math.PI / 180;
+        }
+
+
+        var triangleVertexPositionBuffer;
+        var triangleVertexColorBuffer;
+        var triangleVertexNormalBuffer;
+        var squareVertexColorBuffer;
+
+
+        /*var s = new RoundedNGon(8);
+        s.roundCorners(0.3);
+        s.cornerN = 4;
+        var band0 = new Band(s.getPoints(1, 0));
+        s.roundCorners(0.1);
+        band0.warpAround(new Point(1, 0, 0), [1, 0, 0]);
+        var band1 = new Band(nGonBand(3, 0.5, 2));
+        band1.warpAround(new Point(-0.7, 0, 0), [0, 0, 1]);
+        band0.connectTo(band1);
+        band0.connectToPoint(band0.getCenter());
+        band1.connectToPoint(band1.getCenter());*/
+        var bbb = Body.create();
+        var shape = Body.addBandsForStepUp(bbb, 1, 1, 0).shape;
+        shape.link();
+
+        function initBuffers() {
+            triangleVertexPositionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, triangleVertexPositionBuffer);
+            var count = shape.getCount();
+            var vertices = shape.toArray(count);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            triangleVertexPositionBuffer.itemSize = 3;
+            triangleVertexPositionBuffer.numItems = vertices.length / 3;
+
+            triangleVertexColorBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, triangleVertexColorBuffer);
+            var colors = shape.toColorArray(count);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+            triangleVertexColorBuffer.itemSize = 4;
+            triangleVertexColorBuffer.numItems = colors.length / 4;
+
+
+
+            triangleVertexNormalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, triangleVertexNormalBuffer);
+            var vertexNormals = shape.toNormalArray(count);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertexNormals), gl.STATIC_DRAW);
+            triangleVertexNormalBuffer.itemSize = 3;
+            triangleVertexNormalBuffer.numItems = vertexNormals.length / 3;;
+
+
+
+
+
+
+
+
+        }
+
+
+
+        var tri = {
+            quad: quat4.create([1, -1, 1, 1]),
+            angles: {
+                x: -90,
+                y: 90,
+                z: 0
+            },
+            point: {
+                x: 0,
+                y: -1,
+                z: -7
+            }
+        };
+
+        function drawScene() {
+            gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+            mat4.perspective(45, gl.viewportWidth / gl.viewportHeight, 0.1, 100.0, pMatrix);
+
+            mat4.identity(mvMatrix);
+
+            mat4.translate(mvMatrix, [tri.point.x, tri.point.y, tri.point.z]);
+
+            mvPushMatrix();
+            mat4.multiply(mvMatrix, quat4.toMat4(tri.quad));
+
+            //mat4.rotate(mvMatrix, degToRad(tri.angles.z), [0, 0, 1]);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, triangleVertexPositionBuffer);
+            gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute, triangleVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, triangleVertexNormalBuffer);
+            gl.vertexAttribPointer(shaderProgram.vertexNormalAttribute, triangleVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, triangleVertexColorBuffer);
+            gl.vertexAttribPointer(shaderProgram.vertexColorAttribute, triangleVertexColorBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+
+            gl.uniform3f(
+                shaderProgram.ambientColorUniform,
+                0.2,
+                0.2,
+                0.2
+            );
+            var lightingDirection = [
+        -0.25, -0.25, -1
+      ];
+            var adjustedLD = vec3.create();
+            vec3.normalize(lightingDirection, adjustedLD);
+            vec3.scale(adjustedLD, -1);
+            gl.uniform3fv(shaderProgram.lightingDirectionUniform, adjustedLD);
+            gl.uniform3f(
+                shaderProgram.directionalColorUniform,
+                0.8,
+                0.8,
+                0.8
+            );
+
+
+            setMatrixUniforms();
+            gl.drawArrays(gl.TRIANGLES, 0, triangleVertexPositionBuffer.numItems);
+            mvPopMatrix();
+
+
+        }
+
+
+        var lastTime = 0;
+
+        function animate() {
+            var timeNow = new Date().getTime();
+            if (lastTime != 0) {
+                UPDATE_NEED = false;
+                var elapsed = timeNow - lastTime;
+                var speed = elapsed / 1000.0;
+                var rspeed = elapsed / 1000.0 * 90;
+                var a2 = 3.14 * elapsed / 1000.0 / 2;
+                var s = Math.sin(a2);
+                var c = Math.cos(a2);
+                if (KEYS[81]) {
+                    UPDATE_NEED = true;
+                    tri.point.y += 1 * speed;
+                } else if (KEYS[69]) {
+                    UPDATE_NEED = true;
+                    tri.point.y -= 1 * speed;
+                }
+
+                if (KEYS[87]) {
+                    UPDATE_NEED = true;
+                    tri.point.z -= 1 * speed;
+                } else if (KEYS[83]) {
+                    tri.point.z += 1 * speed;
+                    UPDATE_NEED = true;
+                }
+
+                if (KEYS[65]) {
+                    UPDATE_NEED = true;
+                    tri.point.x -= 1 * speed;
+                } else if (KEYS[68]) {
+                    tri.point.x += 1 * speed;
+                    UPDATE_NEED = true;
+                }
+
+                if (KEYS[73]) {
+                    UPDATE_NEED = true;
+                    quat4.multiply(tri.quad, quat4.fromVecCS(quat4.toVecBackward(tri.quad), c, -s));
+
+                } else if (KEYS[75]) {
+                    UPDATE_NEED = true;
+                    quat4.multiply(tri.quad, quat4.fromVecCS(quat4.toVecBackward(tri.quad), c, s));
+                }
+
+                if (KEYS[74]) {
+                    UPDATE_NEED = true;
+                    quat4.multiply(tri.quad, quat4.fromVecCS(quat4.toVecRight(tri.quad), c, s));
+                } else if (KEYS[76]) {
+                    UPDATE_NEED = true;
+                    quat4.multiply(tri.quad, quat4.fromVecCS(quat4.toVecRight(tri.quad), c, -s));
+                }
+
+                if (KEYS[85]) {
+                    UPDATE_NEED = true;
+                    quat4.multiply(tri.quad, quat4.fromVecCS(quat4.toVecUp(tri.quad), c, s));
+                } else if (KEYS[79]) {
+                    quat4.multiply(tri.quad, quat4.fromVecCS(quat4.toVecUp(tri.quad), c, -s));
+                    UPDATE_NEED = true;
+                }
+
+                //rTri += (90 * elapsed) / 1000.0;
+            } else {
+                UPDATE_NEED = true;
+            }
+            if (UPDATE_NEED) {
+                quat4.normalize(tri.quad);
+            }
+            lastTime = timeNow;
+        }
+
+        var UPDATE_NEED = true;
+
+        function tick() {
+
+
+
+
+
+            drawScene();
+            animate();
+
+            if (UPDATE_NEED)
+                requestAnimFrame(tick);
+            else
+                lastTime = 0;
+        }
+
+
+        function webGLStart() {
+            var canvas = document.getElementById("display");
+            initGL(canvas);
+            initShaders()
+            initBuffers();
+
+            gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            gl.enable(gl.DEPTH_TEST);
+
+            tick();
+        }
+
+        var neheTexture;
+
+        function handleLoadedTexture(texture) {
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, texture.image);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+        }
+        var KEYS = {};
+        window.addEventListener("keydown", function (e) {
+            code = e.keyCode || e.which;
+            KEYS[code] = true;
+            console.log(code);
+            if (!UPDATE_NEED)
+                requestAnimFrame(tick);
+        });
+        window.addEventListener("keyup", function (e) {
+            code = e.keyCode || e.which;
+            KEYS[code] = false;
+        });
+
+        window.addEventListener("load", webGLStart);
+    </script>
+
+</head>
+
+
+<body style="margin:0px;">
+    <canvas id="display" style="border: none;" width="500" height="500"></canvas>
+</body>
+
+</html>
